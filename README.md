@@ -23,6 +23,16 @@ This demo shows merging of laser scan data from 2 lidars.
 ros2 launch dual_laser_merger demo_laser_merger.launch.py
 ```
 
+## LakiBeam dual lidar
+
+With `/scan0`, `/scan1` and their static TFs running:
+
+```bash
+ros2 launch dual_laser_merger dual_lidar_merger.launch.py
+```
+
+The node publishes `/scan_merged` and `/cloud_merged` in `base_link`.
+
 ## Requirements
 1. Lidar 1 scan topic, the messages in the topic are required to have `frame_id`.
    ```

@@ -31,26 +31,19 @@ MergerNode::MergerNode(const rclcpp::NodeOptions & options)
 
   merged_scan_pub =
     this->create_publisher<sensor_msgs::msg::LaserScan>(this->get_parameter(
-      "merged_scan_topic").as_string(), rclcpp::SensorDataQoS());
+      "merged_scan_topic").as_string(), rclcpp::QoS(10));
   merged_cloud_pub =
     this->create_publisher<sensor_msgs::msg::PointCloud2>(this->get_parameter(
-      "merged_cloud_topic").as_string(), rclcpp::SensorDataQoS());
-  laser_1_sub.subscribe(this, this->get_parameter("laser_1_topic").as_string(),
-      rclcpp::SensorDataQoS());
-  laser_2_sub.subscribe(this, this->get_parameter("laser_2_topic").as_string(),
-      rclcpp::SensorDataQoS());
+      "merged_cloud_topic").as_string(), rclcpp::QoS(10));
+  laser_1_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
+    this->get_parameter("laser_1_topic").as_string(), rclcpp::QoS(10),
+    std::bind(&MergerNode::laser_1_callback, this, std::placeholders::_1));
+  laser_2_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
+    this->get_parameter("laser_2_topic").as_string(), rclcpp::QoS(10),
+    std::bind(&MergerNode::laser_2_callback, this, std::placeholders::_1));
 
   tf2_buffer = std::make_shared<tf2_ros::Buffer>(this->get_clock());
   tf2_listener = std::make_shared<tf2_ros::TransformListener>(*tf2_buffer, this);
-  message_filter =
-    std::make_shared<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<
-        sensor_msgs::msg::LaserScan, sensor_msgs::msg::LaserScan>>>(
-      message_filters::sync_policies::ApproximateTime<
-      sensor_msgs::msg::LaserScan, sensor_msgs::msg::LaserScan>(input_queue_size_param),
-      laser_1_sub, laser_2_sub);
-  message_filter->setAgePenalty(tolerance_param);
-  message_filter->registerCallback(
-    std::bind(&MergerNode::sub_callback, this, std::placeholders::_1, std::placeholders::_2));
   tf2_broadcaster = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
 }
 
@@ -62,8 +55,6 @@ void MergerNode::declare_param()
   this->declare_parameter("merged_cloud_topic", "merged_cloud");
   target_frame_param = this->declare_parameter("target_frame", "");
   tolerance_param = this->declare_parameter("tolerance", 0.01);
-  input_queue_size_param =
-    this->declare_parameter("queue_size", static_cast<int>(std::thread::hardware_concurrency()));
   min_height_param = this->declare_parameter("min_height", std::numeric_limits<double>::min());
   max_height_param = this->declare_parameter("max_height", std::numeric_limits<double>::max());
   angle_min_param = this->declare_parameter("angle_min", -M_PI);
@@ -89,7 +80,6 @@ void MergerNode::declare_param()
 void MergerNode::refresh_param()
 {
   this->get_parameter("tolerance", tolerance_param);
-  this->get_parameter("queue_size", input_queue_size_param);
   this->get_parameter("min_height", min_height_param);
   this->get_parameter("max_height", max_height_param);
   this->get_parameter("angle_min", angle_min_param);
@@ -109,6 +99,32 @@ void MergerNode::refresh_param()
   this->get_parameter("allowed_radius", allowed_radius_param);
   this->get_parameter("enable_shadow_filter", enable_shadow_filter_param);
   this->get_parameter("enable_average_filter", enable_average_filter_param);
+}
+
+void MergerNode::laser_1_callback(
+  const sensor_msgs::msg::LaserScan::ConstSharedPtr lidar_1_msg)
+{
+  latest_laser_1 = lidar_1_msg;
+  laser_1_fresh = true;
+  merge_latest();
+}
+
+void MergerNode::laser_2_callback(
+  const sensor_msgs::msg::LaserScan::ConstSharedPtr lidar_2_msg)
+{
+  latest_laser_2 = lidar_2_msg;
+  laser_2_fresh = true;
+  merge_latest();
+}
+
+void MergerNode::merge_latest()
+{
+  if (!laser_1_fresh || !laser_2_fresh) {
+    return;
+  }
+  laser_1_fresh = false;
+  laser_2_fresh = false;
+  sub_callback(latest_laser_1, latest_laser_2);
 }
 
 void MergerNode::sub_callback(
@@ -159,18 +175,20 @@ void MergerNode::sub_callback(
     }
 
     if (lidar_1_msg->header.frame_id != target_frame_param) {
-      tf2_msg.header = cloud_in_1.header;
-      tf2_msg.child_frame_id = cloud_in_1.header.frame_id + "_calibrated";
-      tf2_msg.transform.translation.x = laser_1_x_offset;
-      tf2_msg.transform.translation.y = laser_1_y_offset;
-      tf2_msg.transform.translation.z = 0.0;
-      tf2_quaternion.setRPY(0, 0, laser_1_yaw_offset);
-      tf2_msg.transform.rotation.x = tf2_quaternion.x();
-      tf2_msg.transform.rotation.y = tf2_quaternion.y();
-      tf2_msg.transform.rotation.z = tf2_quaternion.z();
-      tf2_msg.transform.rotation.w = tf2_quaternion.w();
-      tf2_broadcaster->sendTransform(tf2_msg);
-      cloud_in_1.header.frame_id = tf2_msg.child_frame_id;
+      if (enable_calibration_param) {
+        tf2_msg.header = cloud_in_1.header;
+        tf2_msg.child_frame_id = cloud_in_1.header.frame_id + "_calibrated";
+        tf2_msg.transform.translation.x = laser_1_x_offset;
+        tf2_msg.transform.translation.y = laser_1_y_offset;
+        tf2_msg.transform.translation.z = 0.0;
+        tf2_quaternion.setRPY(0, 0, laser_1_yaw_offset);
+        tf2_msg.transform.rotation.x = tf2_quaternion.x();
+        tf2_msg.transform.rotation.y = tf2_quaternion.y();
+        tf2_msg.transform.rotation.z = tf2_quaternion.z();
+        tf2_msg.transform.rotation.w = tf2_quaternion.w();
+        tf2_broadcaster->sendTransform(tf2_msg);
+        cloud_in_1.header.frame_id = tf2_msg.child_frame_id;
+      }
 
       try {
         cloud_in_1 = tf2_buffer->transform(
@@ -182,18 +200,20 @@ void MergerNode::sub_callback(
     }
 
     if (lidar_2_msg->header.frame_id != target_frame_param) {
-      tf2_msg.header = cloud_in_2.header;
-      tf2_msg.child_frame_id = cloud_in_2.header.frame_id + "_calibrated";
-      tf2_msg.transform.translation.x = laser_2_x_offset;
-      tf2_msg.transform.translation.y = laser_2_y_offset;
-      tf2_msg.transform.translation.z = 0.0;
-      tf2_quaternion.setRPY(0, 0, laser_2_yaw_offset);
-      tf2_msg.transform.rotation.x = tf2_quaternion.x();
-      tf2_msg.transform.rotation.y = tf2_quaternion.y();
-      tf2_msg.transform.rotation.z = tf2_quaternion.z();
-      tf2_msg.transform.rotation.w = tf2_quaternion.w();
-      tf2_broadcaster->sendTransform(tf2_msg);
-      cloud_in_2.header.frame_id = tf2_msg.child_frame_id;
+      if (enable_calibration_param) {
+        tf2_msg.header = cloud_in_2.header;
+        tf2_msg.child_frame_id = cloud_in_2.header.frame_id + "_calibrated";
+        tf2_msg.transform.translation.x = laser_2_x_offset;
+        tf2_msg.transform.translation.y = laser_2_y_offset;
+        tf2_msg.transform.translation.z = 0.0;
+        tf2_quaternion.setRPY(0, 0, laser_2_yaw_offset);
+        tf2_msg.transform.rotation.x = tf2_quaternion.x();
+        tf2_msg.transform.rotation.y = tf2_quaternion.y();
+        tf2_msg.transform.rotation.z = tf2_quaternion.z();
+        tf2_msg.transform.rotation.w = tf2_quaternion.w();
+        tf2_broadcaster->sendTransform(tf2_msg);
+        cloud_in_2.header.frame_id = tf2_msg.child_frame_id;
+      }
 
       try {
         cloud_in_2 = tf2_buffer->transform(
