@@ -29,17 +29,30 @@ MergerNode::MergerNode(const rclcpp::NodeOptions & options)
     RCLCPP_INFO(this->get_logger(), "Target Frame: %s", target_frame_param.c_str());
   }
 
+  // 传感器流一律用 SensorDataQoS（BEST_EFFORT + KEEP_LAST(5)），不用默认的
+  // rclcpp::QoS(10)（RELIABLE）。
+  //
+  // RELIABLE 订阅者必须按顺序收到【每一帧】—— 一旦处理慢了就只能补历史，
+  // 越补越落后，拿到的永远是旧帧，表现成「憋一阵、爆发几帧」。
+  // 2026-09-17 实测 /scan_merged 相邻帧间隔 min 0.004s / max 2.2s 就是这个形状。
+  // 而 BEST_EFFORT 允许丢掉积压的旧帧、直接拿最新的 —— 对雷达这种
+  // 「下一帧马上就来、旧帧毫无价值」的数据，这才是正确语义。
+  //
+  // ⚠️ 发布端改成 BEST_EFFORT 之后，RELIABLE 的订阅者会【完全收不到】
+  //    （QoS 不兼容）。rviz 里对应的显示项要把 Reliability Policy 设成 Best Effort。
+  auto sensor_qos = rclcpp::SensorDataQoS();
+
   merged_scan_pub =
     this->create_publisher<sensor_msgs::msg::LaserScan>(this->get_parameter(
-      "merged_scan_topic").as_string(), rclcpp::QoS(10));
+      "merged_scan_topic").as_string(), sensor_qos);
   merged_cloud_pub =
     this->create_publisher<sensor_msgs::msg::PointCloud2>(this->get_parameter(
-      "merged_cloud_topic").as_string(), rclcpp::QoS(10));
+      "merged_cloud_topic").as_string(), sensor_qos);
   laser_1_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
-    this->get_parameter("laser_1_topic").as_string(), rclcpp::QoS(10),
+    this->get_parameter("laser_1_topic").as_string(), sensor_qos,
     std::bind(&MergerNode::laser_1_callback, this, std::placeholders::_1));
   laser_2_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
-    this->get_parameter("laser_2_topic").as_string(), rclcpp::QoS(10),
+    this->get_parameter("laser_2_topic").as_string(), sensor_qos,
     std::bind(&MergerNode::laser_2_callback, this, std::placeholders::_1));
 
   tf2_buffer = std::make_shared<tf2_ros::Buffer>(this->get_clock());
